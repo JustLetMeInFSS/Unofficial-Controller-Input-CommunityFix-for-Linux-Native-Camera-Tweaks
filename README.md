@@ -48,7 +48,7 @@ Unsupported executables are left untouched and the mod disables itself safely.
 
 ## Installation
 
-1. Download `linux_native_camera_tweaks.so`.
+1. Download `linux_native_camera_tweaks.so`. located in the zip folder in src folder
 2. Place it in a permanent location without spaces, for example:
 
    ```text
