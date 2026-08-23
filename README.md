@@ -2,7 +2,7 @@
 
 An unofficial controller, mouse-input, stability, and portability patch for
 [BG3 Linux Native Camera Tweaks](https://www.nexusmods.com/baldursgate3/mods/23896).
-based on the original Version 1.0.21
+Based on the original Version 1.0.21
 
 The original mod and camera implementation were created by **Biiinks78 / 0x1496FD0**.
 This fork focuses on making the native Linux version responsive, stable, and
