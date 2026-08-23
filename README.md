@@ -1,4 +1,4 @@
-# Linux Native Camera Tweaks
+# Linux Native Camera Tweaks FIX
 
 A native Linux mod for **Baldur's Gate 3** that reworks the game's camera system: rotation around your character on any axis and no more zoom min/max limit.
 
