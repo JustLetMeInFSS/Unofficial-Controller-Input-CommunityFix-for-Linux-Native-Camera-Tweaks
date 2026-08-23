@@ -4,6 +4,10 @@ A native Linux mod for **Baldur's Gate 3** that reworks the game's camera system
 
 **Unofficial Linux input and stability fixes for BG3 Native Camera Tweaks: responsive controller camera, L3 zoom, stable axes and zoom, seamless mouse/controller switching, configurable pitch speeds, portable XDG configuration, and safe game-build detection. Original mod by Biiinks78 / 0x1496FD0.**
 
+**.zip is in the src folder**
+
+I'll take this down if the OG Author asks me to don't worry
+
 ![Version](https://img.shields.io/badge/version-1.0.21-blue)
 ![Platform](https://img.shields.io/badge/Linux-green)
 ![Game Build1](https://img.shields.io/badge/BG3-4.1.1.7209685-orange)
