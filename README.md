@@ -41,22 +41,7 @@ through normally.
 
 ## Installation
 
-1. Download `linux_native_camera_tweaks.so`.
-2. Place it in a permanent location without spaces, for example:
-
-   ```text
-   /home/your-user/Mods/BG3/linux_native_camera_tweaks.so
-   ```
-
-3. Add the absolute path to BG3's Steam launch options:
-
-   ```text
-   LD_PRELOAD=/home/your-user/Mods/BG3/linux_native_camera_tweaks.so %command%
-   ```
-
-4. Start the native Linux version of BG3.
-
-No installer, administrator access, or manual configuration is required.
+This branch contains the stable source code submitted in upstream PR #2. It does not distribute a prebuilt .so file. Build the shared library locally.
 
 ## Configuration
 
