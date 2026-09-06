@@ -56,7 +56,7 @@ No installer or administrator access is required.
 On first launch, the mod creates:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/bg3-native-camera-tweaks.conf
+~/.config/bg3-native-camera-tweaks.conf
 ```
 
 Default settings:
