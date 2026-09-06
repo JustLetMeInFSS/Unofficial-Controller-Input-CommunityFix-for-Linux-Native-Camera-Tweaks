@@ -13,25 +13,12 @@ portable across user installations.
 
 ## What this patch changes
 
-- Removes controller input delay caused by prematurely ending SDL event polling.
-- Makes vertical controller rotation frame-rate independent and configurable.
-- Adds L3 + right-stick vertical movement for smooth camera zoom.
-- Preserves a normal L3 click when L3 was not used for zoom.
-- Prevents persistent zoom jitter by synchronizing custom zoom changes and then
-  preserving BG3's native zoom-state update.
-- Prevents intermittent controller-axis inversion.
-- Reconciles live controller state so lost release or centering events cannot
-  leave pitch or zoom active.
-- Keeps switching between controller and mouse/keyboard seamless.
-- Adds configurable vertical mouse-camera speed.
-- Uses portable XDG paths and automatically creates a per-user configuration.
-- Falls back to the middle mouse button when BG3 has not serialized its default
-  mouse-rotate binding.
-- Reloads a changed BG3 mouse-rotate binding automatically, without hooking an
-  unstable build-specific save-function ABI.
-- Uses executable hashes as known-build information, while allowing a newer
-  build only when every pattern is unique and the patch instruction validates.
-- Requires only GLIBC 2.17 or newer and has no runtime dependency beyond libc.
+- Fixes controller input delay and unstable input switching.
+- Adds frame-rate-independent controller pitch and L3 + right-stick zoom.
+- Fixes persistent zoom jitter while retaining BG3’s native zoom limits.
+- Supports configurable sensitivity, zoom direction, and mouse-camera speed.
+- Reloads changed mouse-rotation bindings without restarting the game.
+- Adds portable paths, safer pattern validation, and broader build compatibility.
 
 The controller response model is based on the deadzone and time-scaled pitch
 formula used by
