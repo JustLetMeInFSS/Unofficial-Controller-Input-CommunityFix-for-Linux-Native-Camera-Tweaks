@@ -17,19 +17,11 @@ portable across user installations.
 - Removes controller input delay caused by prematurely ending SDL event polling.
 - Makes vertical controller rotation frame-rate independent and configurable.
 - Adds L3 + right-stick vertical movement for smooth camera zoom.
-- Preserves a normal L3 click when L3 was not used for zoom.
-- Prevents persistent zoom jitter by synchronizing BG3's zoom state only during
-  actual custom zoom input.
-- Prevents intermittent controller-axis inversion.
-- Reconciles live controller state so lost release or centering events cannot
-  leave pitch or zoom active.
-- Keeps switching between controller and mouse/keyboard seamless.
+- Prevents persistent zoom jitter
 - Adds configurable vertical mouse-camera speed.
 - Uses portable XDG paths and automatically creates a per-user configuration.
 - Falls back to the middle mouse button when BG3 has not serialized its default
   mouse-rotate binding.
-- Detects supported BG3 builds before patching and disables itself safely on an
-  unknown build.
 - Requires only GLIBC 2.17 or newer and has no runtime dependency beyond libc.
 
 The controller response model is based on the deadzone and time-scaled pitch
