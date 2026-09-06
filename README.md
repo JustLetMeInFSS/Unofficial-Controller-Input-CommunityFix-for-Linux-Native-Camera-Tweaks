@@ -1,47 +1,55 @@
-# Unofficial Controller Input Community Fix
+# Linux Native Camera Tweaks (Community Fixes)
 
-An unofficial controller, mouse-input, stability, and portability patch for
-[BG3 Linux Native Camera Tweaks](https://www.nexusmods.com/baldursgate3/mods/23896).
+A native Linux camera mod for **Baldur’s Gate 3**, originally created by **Biiinks78 / 0x1496FD0** and expanded through community contributions.
 
-The original mod and camera implementation were created by **Biiinks78 / 0x1496FD0**.
-This fork focuses on making the native Linux version responsive, stable, and
-portable across user installations.
-
-![Version](https://img.shields.io/badge/version-1.0.22--community--input--fix-blue)
+![Version](https://img.shields.io/badge/version-1.0.22-blue)
 ![Platform](https://img.shields.io/badge/platform-Linux-green)
 ![Architecture](https://img.shields.io/badge/architecture-x86--64-lightgrey)
 
-## What this patch changes
+## Features
 
-- Fixes controller input delay and unstable input switching.
-- Adds frame-rate-independent controller pitch and L3 + right-stick zoom.
-- Fixes persistent zoom jitter while retaining BG3’s native zoom limits.
-- Supports configurable sensitivity, zoom direction, and mouse-camera speed.
-- Reloads changed mouse-rotation bindings without restarting the game.
-- Adds portable paths, safer pattern validation, and broader build compatibility.
+* Extended vertical camera rotation with mouse and controller.
+* Frame-rate-independent and configurable controller pitch.
+* L3 + right-stick vertical movement for smooth zoom control.
+* Normal L3 clicks remain available when L3 is not used for zooming.
+* Stable switching between controller and mouse/keyboard.
+* Live controller-state reconciliation prevents stuck or inverted input.
+* Automatic mouse-rotation binding reload without restarting the game.
+* Portable profile and configuration paths.
+* Safe pattern and instruction validation for compatible future game builds.
 
-The controller response model is based on the deadzone and time-scaled pitch
-formula used by
-[BG3 Native Camera Tweaks for Windows](https://github.com/ersh1/BG3_NativeCameraTweaks).
-Technical details and tests are documented in
-[`CONTROLLER_INPUT_ANALYSIS.md`](CONTROLLER_INPUT_ANALYSIS.md).
+The update also fixes controller input delay caused by prematurely terminating SDL event polling and resolves persistent camera jitter after zooming.
 
-## Game-build compatibility
+Technical details are available in [`CONTROLLER_INPUT_ANALYSIS.md`](CONTROLLER_INPUT_ANALYSIS.md).
 
-This release was tested against the native Linux versions:
+## Game compatibility
 
-- `4.1.1.7209685`
-- `4.1.1.7398727`
+Known BG3 builds:
 
-Other builds are not rejected by hash alone. The mod continues only if each
-camera pattern has exactly one match, the camera call is a valid `CALL rel32`,
-and the pitch instruction has the expected opcode and object offset. If any
-check fails, camera modifications remain inactive and SDL input is passed
-through normally.
+* `4.1.1.7209685`
+* `4.1.1.7398727`
+
+On other builds, the mod initializes only when every required pattern is unique and the expected camera instructions can be validated. If validation fails, the camera modifications remain inactive.
 
 ## Installation
 
-This branch contains the stable source code submitted in upstream PR #2. It does not distribute a prebuilt .so file. Build the shared library locally.
+1. Download `linux_native_camera_tweaks.so`.
+
+2. Place it in a permanent location, for example:
+
+   ```text
+   ~/Mods/BG3/linux_native_camera_tweaks.so
+   ```
+
+3. Add its absolute path to BG3’s Steam launch options:
+
+   ```text
+   LD_PRELOAD="~/Mods/BG3/linux_native_camera_tweaks.so" %command%
+   ```
+
+4. Launch the native Linux version of BG3.
+
+No installer or administrator access is required.
 
 ## Configuration
 
@@ -61,48 +69,39 @@ invert_controller_pitch=false
 invert_controller_zoom=false
 ```
 
-Close BG3 before editing the file and restart the game afterward.
+* `controller_pitch_sensitivity`: vertical controller camera speed
+* `controller_zoom_speed`: L3 + right-stick zoom speed
+* `mouse_pitch_sensitivity`: vertical mouse camera speed
+* `invert_controller_pitch`: reverses vertical controller rotation
+* `invert_controller_zoom`: reverses controller zoom direction
 
-- `controller_pitch_sensitivity`: vertical controller camera speed
-- `controller_zoom_speed`: L3 + right-stick zoom speed
-- `mouse_pitch_sensitivity`: vertical camera speed while holding mouse rotate
-- `invert_controller_pitch`: `true` or `false`
-- `invert_controller_zoom`: `false` makes stick up zoom in; `true` reverses it
+With the default configuration, pushing the stick upward zooms in.
 
-Existing configuration files are preserved. Missing settings are added with
-their default values.
+Configuration-file changes require a game restart. Changes to BG3’s mouse-rotation binding are detected automatically while the game is running.
 
-BG3 mouse-rotate bindings are read from the active profile's
-`inputconfig_p1.json`. Changes made in BG3 are detected within about half a
-second and do not require a restart. Configuration-file changes still require a
-restart.
+## Current limitations
 
-## Zoom stability and limits
+### Native zoom limits
 
-The original patch disabled one of BG3's native zoom-state writes. Runtime
-diagnostics showed that this lets the internal current and desired zoom values
-diverge after zoom input, which produces the persistent micro-jitter. This
-release leaves that native instruction intact and synchronizes all three known
-zoom fields only when applying a custom mouse-wheel or L3 + right-stick step.
+BG3’s native minimum and maximum zoom limits remain enabled.
 
-The tradeoff is intentional: BG3's native closest and farthest zoom limits are
-active again. The earlier excessive near/far range is not part of this stable
-fix because restoring it by disabling the native write reintroduces the jitter.
+Earlier versions disabled an internal zoom-state write to provide a much larger zoom range. Runtime diagnostics showed that this caused the internal zoom values to diverge, producing persistent micro-jitter after zooming. Restoring the native update eliminated the jitter but also restored the normal zoom limits.
 
-## Known limitation
+A larger stable zoom range may be explored separately in a future experimental update.
 
-The patch intentionally does not modify BG3's Tactical Camera command. Extended
-top-down camera angles work, but the game's automatic tactical outlines may not
-remain active after switching from mouse/keyboard to controller.
+### Tactical Camera
 
-As a workaround, use BG3's outline key while using mouse/keyboard (`^` on a
-German keyboard layout). A proper controller-compatible solution would require
-a separate high-level game-action hook and is not included in this stable
-release.
+Dedicated controller-compatible Tactical Camera behavior is not included in this release. Extended top-down camera angles remain available, but tactical outlines may not persist after switching from mouse/keyboard to controller.
+
+This feature is intentionally deferred to avoid adding another unverified game-action hook to the stable release.
 
 ## Building and testing
 
-SDL2 development headers and CMake 3.16 or newer are required:
+Requirements:
+
+* CMake 3.16 or newer
+* SDL2 development headers
+* A C99-compatible compiler
 
 ```bash
 cmake -S . -B build -DBUILD_TESTING=ON
@@ -110,20 +109,26 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Full verification of runtime camera hooks still requires a supported native BG3
-build.
+The resulting shared object requires GLIBC 2.17 or newer and has no direct SDL runtime dependency.
 
-## Credits and permissions
+Runtime camera-hook validation still requires the native Linux version of BG3.
 
-- Original Linux mod: **Biiinks78 / 0x1496FD0**
-- Additional safety and default-binding work: **Joegoldin**
-- Windows implementation used as a technical reference: **ersh1**
-- Community input and portability fixes: **JustLetMeInFSS**
+## Credits
 
-The original author's stated permissions allow modified bug fixes and feature
-improvements with credit. The original restrictions still apply: do not upload
-the original mod to other sites, convert it for other games, sell this work, or
-earn donation points from it.
+* **Biiinks78 / 0x1496FD0** — original Linux mod and camera hooks
+* **JustLetMeInFSS** — controller input, zoom, portability and integration work
+* **Joe Goldin / Joegoldin** — SDL event-queue, safety and binding-fallback contributions
+* **ersh1** — Windows implementation used as a controller-response reference
 
-This repository is an unofficial derivative fork and does not claim ownership
-of the original mod.
+## Permissions
+
+Bug fixes and feature improvements are allowed with appropriate credit to the original creator.
+
+The original restrictions remain in effect:
+
+* Do not upload the mod to other sites.
+* Do not convert it for other games.
+* Do not sell it or use it in paid mods.
+* Do not earn donation points from it.
+
+[Nexus Mods page](https://www.nexusmods.com/baldursgate3/mods/23896)
