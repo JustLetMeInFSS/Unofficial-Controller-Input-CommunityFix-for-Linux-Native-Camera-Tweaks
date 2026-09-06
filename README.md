@@ -117,7 +117,7 @@ Runtime camera-hook validation still requires the native Linux version of BG3.
 
 * **Biiinks78 / 0x1496FD0** — original Linux mod and camera hooks
 * **JustLetMeInFSS** — controller input, zoom, portability and integration work
-* **Joe Goldin / Joegoldin** — SDL event-queue, safety and binding-fallback contributions
+* **Joegoldin** — SDL event-queue, safety and binding-fallback contributions
 * **ersh1** — Windows implementation used as a controller-response reference
 
 ## Permissions
