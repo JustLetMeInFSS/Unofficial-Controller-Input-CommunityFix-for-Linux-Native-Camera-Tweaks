@@ -1,0 +1,9 @@
+# BG3 Linux Native Camera Tweaks - controller input community fix
+# Restart BG3 after changing this file.
+# Lower values reduce camera speed; higher values increase it.
+controller_pitch_sensitivity=0.25
+controller_zoom_speed=15.00
+mouse_pitch_sensitivity=1.50
+invert_controller_pitch=false
+# false: stick up zooms in; true: stick up zooms out
+invert_controller_zoom=false

@@ -1,136 +1,354 @@
 #include <dlfcn.h>
 #include <sys/types.h>
 #include <stdatomic.h>
+#include <time.h>
+#include <wchar.h>
 #include <SDL2/SDL.h>
 
+#include "config.h"
+#include "camera_state.h"
+#include "controller_input.h"
+#include "file_stamp.h"
+#include "portable_paths.h"
 #include "sdl_bindings.h"
 #include "utils.h"
 #include "offsets.h"
 
 
-#define VERSION "1.0.21"
+#define VERSION "1.0.22-community-input-fix"
 //Tested Game build:
 	//4.1.1.7398727
 	//4.1.1.7209685
 
-#define ROLL_SENSITIVITY 2.f
-#define ZOOM_FACTOR 0.25f
+#define MOUSE_ZOOM_FACTOR 0.25f
 
-#define CONTROLLER_ROLL_SPEED 2.f
-#define CONTROLLER_DEADZONE 4000
+#define CAMERA_OBJECT_ROTATION_SPEED_OFFSET 0xC4
+#define MAX_CAMERA_DELTA_TIME 0.1f
+#define MAX_TRACKED_CAMERAS 8
+#define BINDING_RELOAD_INTERVAL_NS 500000000L
 
 
 static pid_t g_pid = 0;
+static int g_setup_succeeded;
 static uint64_t g_game_build;
 
-static float* g_zoom;
 static float* g_roll;
 
 static atomic_int g_mouse_delta_y;
 static atomic_int g_mouse_wheel_y;
 static atomic_int g_roll_keydown = 0;
+static atomic_int g_roll_input_sources = 0;
+static atomic_int g_mod_owns_relative_mouse_mode = 0;
+static atomic_int g_ignore_next_mouse_motion = 0;
 static atomic_int g_controller_right_stick_y;
 static atomic_int g_controller_right_stick_axis_motion_y = 0;
-static atomic_int g_controller_right_stick_button_down = 0;
+static atomic_int g_controller_left_stick_button_down = 0;
+static atomic_int g_controller_left_stick_used_for_zoom = 0;
+static atomic_int g_controller_instance_id = -1;
+
+static SDL_Event g_left_stick_down_event;
+static int g_has_left_stick_down_event;
+static SDL_Event g_deferred_controller_events[2];
+static int g_deferred_controller_event_count;
+static int g_deferred_controller_event_index;
+
+static LNCT_Config g_config =
+{
+	.controller_pitch_sensitivity = LNCT_DEFAULT_CONTROLLER_PITCH_SENSITIVITY,
+	.controller_zoom_speed = LNCT_DEFAULT_CONTROLLER_ZOOM_SPEED,
+	.mouse_pitch_sensitivity = LNCT_DEFAULT_MOUSE_PITCH_SENSITIVITY,
+	.invert_controller_pitch = 0,
+	.invert_controller_zoom = LNCT_DEFAULT_INVERT_CONTROLLER_ZOOM,
+};
+static char g_config_path[1024];
+
+typedef struct
+{
+	void* camera_object;
+	struct timespec last_update;
+} CameraTiming;
+static CameraTiming g_camera_timings[MAX_TRACKED_CAMERAS];
 
 static BindingSet g_bs;
-static ActionBindings* g_binds[1];
+static const ActionBindings* g_binds[1];
+static ActionBindings g_default_roll_binding;
+static char g_input_config_path[1200];
+static LNCT_FileStamp g_input_config_stamp;
+static struct timespec g_last_binding_check;
 	 
 static int (*O_PollEvent)(SDL_Event*) = NULL;
-static int (*O_SDL_GetRelativeMouseMode)() = NULL;
-static void (*O_SDL_SetRelativeMouseMode)(int) = NULL;
+static SDL_bool (*O_SDL_GetRelativeMouseMode)(void) = NULL;
+static int (*O_SDL_SetRelativeMouseMode)(SDL_bool) = NULL;
+static SDL_GameController* (*O_SDL_GameControllerFromInstanceID)(SDL_JoystickID) = NULL;
+static Sint16 (*O_SDL_GameControllerGetAxis)(SDL_GameController*, SDL_GameControllerAxis) = NULL;
+static Uint8 (*O_SDL_GameControllerGetButton)(SDL_GameController*, SDL_GameControllerButton) = NULL;
+
+#if defined(__GLIBC__)
+extern void* LNCT_DlsymCompat(void*, const char*);
+__asm__(".symver LNCT_DlsymCompat,dlsym@GLIBC_2.2.5");
+#else
+#define LNCT_DlsymCompat dlsym
+#endif
 
 typedef float (*CalculateCameraAngle_t)(void*, uint8_t);
 static CalculateCameraAngle_t O_CalculateCameraAngle;
 
-typedef uint8_t undefined8[8];
-typedef void (*SaveToInputConfigFile_4117209685_t)(undefined8, undefined8, undefined8, undefined8, undefined8, undefined8,
-		undefined8, undefined8, long*, long*, mbstate_t, uint*, mbstate_t, undefined8);
-static SaveToInputConfigFile_4117209685_t O_SaveToInputConfigFile_4117209685;
-typedef void (*SaveToInputConfigFile_4117398727_t)(undefined8, long, undefined8);
-static SaveToInputConfigFile_4117398727_t O_SaveToInputConfigFile_4117398727;
-
-
-void H_SaveToInputConfigFile_4117398727_CallSite(undefined8 p1, long p2, undefined8 p3)
+enum
 {
-	O_SaveToInputConfigFile_4117398727(p1, p2, p3);
+	ROLL_INPUT_MOUSE = 1,
+	ROLL_INPUT_KEYBOARD = 2,
+};
 
-	if (!LoadBindingsFromFile("~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json", &g_bs))
+
+static void SetRollInputSource(int source, int active)
+{
+	if (active)
 	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: H_SaveToInputConfigFile_4117451994_CallSite(): Couldn't load ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
-    	return;
+		int previous_sources = atomic_fetch_or(&g_roll_input_sources, source);
+		if (previous_sources != 0)
+			return;
+
+		atomic_store(&g_roll_keydown, 1);
+		if (O_SDL_GetRelativeMouseMode && O_SDL_SetRelativeMouseMode
+			&& O_SDL_GetRelativeMouseMode() != SDL_TRUE
+			&& O_SDL_SetRelativeMouseMode(SDL_TRUE) == 0)
+		{
+			atomic_store(&g_mod_owns_relative_mouse_mode, 1);
+			atomic_store(&g_ignore_next_mouse_motion, 1);
+		}
+		/* Enabling relative mode can itself create a synthetic motion event. */
+		atomic_store(&g_mouse_delta_y, 0);
+		return;
 	}
-	g_binds[0] = (ActionBindings*)FindAction(&g_bs, "CameraToggleMouseRotate");
-	if (!g_binds[0])
+
+	int previous_sources = atomic_fetch_and(&g_roll_input_sources, ~source);
+	if ((previous_sources & ~source) != 0)
+		return;
+
+	atomic_store(&g_roll_keydown, 0);
+	atomic_store(&g_mouse_delta_y, 0);
+	atomic_store(&g_ignore_next_mouse_motion, 0);
+	if (atomic_exchange(&g_mod_owns_relative_mouse_mode, 0)
+		&& O_SDL_SetRelativeMouseMode)
 	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Can't find any bind(s) for action \"CameraToggleMouseRotate\" in ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
+		O_SDL_SetRelativeMouseMode(SDL_FALSE);
 	}
 }
 
-void H_SaveToInputConfigFile_4117209685_CallSite(undefined8 p1, undefined8 p2, undefined8 p3, undefined8 p4, undefined8 p5, undefined8 p6,
-		undefined8 p7, undefined8 p8, long* p9, long* p10, mbstate_t p11, uint* p12, mbstate_t p13, undefined8 p14)
+static void ResetInputState(void)
 {
-	O_SaveToInputConfigFile_4117209685(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14);
-
-	if (!LoadBindingsFromFile("~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json", &g_bs))
+	atomic_store(&g_roll_input_sources, 0);
+	atomic_store(&g_roll_keydown, 0);
+	atomic_store(&g_mouse_delta_y, 0);
+	atomic_store(&g_mouse_wheel_y, 0);
+	atomic_store(&g_ignore_next_mouse_motion, 0);
+	if (atomic_exchange(&g_mod_owns_relative_mouse_mode, 0)
+		&& O_SDL_SetRelativeMouseMode)
 	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: H_SaveToInputConfigFile_4117209685_CallSite(): Couldn't load ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
-    	return;
-	}
-	g_binds[0] = (ActionBindings*)FindAction(&g_bs, "CameraToggleMouseRotate");
-	if (!g_binds[0])
-	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Can't find any bind(s) for action \"CameraToggleMouseRotate\" in ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
+		O_SDL_SetRelativeMouseMode(SDL_FALSE);
 	}
 }
+
+static void ResetControllerState(void)
+{
+	atomic_store(&g_controller_right_stick_y, 0);
+	atomic_store(&g_controller_right_stick_axis_motion_y, 0);
+	atomic_store(&g_controller_left_stick_button_down, 0);
+	atomic_store(&g_controller_left_stick_used_for_zoom, 0);
+}
+
+/*
+ * SDL axis/button events describe transitions, not an authoritative snapshot.
+ * If a release/centering event is lost during a focus or input-mode transition,
+ * the old sample otherwise remains active forever.  Reconcile it with SDL's
+ * live controller state on each camera update when the query API is available.
+ */
+static void RefreshControllerState(void)
+{
+	if (!O_SDL_GameControllerFromInstanceID
+		|| !O_SDL_GameControllerGetAxis
+		|| !O_SDL_GameControllerGetButton)
+	{
+		return;
+	}
+
+	SDL_JoystickID instance_id = (SDL_JoystickID)atomic_load(&g_controller_instance_id);
+	if (instance_id < 0)
+		return;
+
+	SDL_GameController* controller = O_SDL_GameControllerFromInstanceID(instance_id);
+	if (!controller)
+		return;
+
+	int16_t right_stick_y = O_SDL_GameControllerGetAxis(
+		controller, SDL_CONTROLLER_AXIS_RIGHTY);
+	int left_stick_down = O_SDL_GameControllerGetButton(
+		controller, SDL_CONTROLLER_BUTTON_LEFTSTICK) != 0;
+	int axis_active = LNCT_NormalizeControllerAxis(right_stick_y) != 0.f;
+
+	atomic_store(&g_controller_right_stick_y, right_stick_y);
+	atomic_store(&g_controller_right_stick_axis_motion_y, axis_active);
+	atomic_store(&g_controller_left_stick_button_down, left_stick_down);
+	if (left_stick_down && axis_active)
+		atomic_store(&g_controller_left_stick_used_for_zoom, 1);
+}
+
+static void UseDefaultRollBinding(void)
+{
+	memset(&g_default_roll_binding, 0, sizeof(g_default_roll_binding));
+	snprintf(g_default_roll_binding.name, sizeof(g_default_roll_binding.name),
+		"CameraToggleMouseRotate");
+	g_default_roll_binding.binding_count = 1;
+	g_default_roll_binding.bindings[0].type = BINDING_MOUSE;
+	g_default_roll_binding.bindings[0].scancode = SDL_SCANCODE_UNKNOWN;
+	g_default_roll_binding.bindings[0].mouse_button = SDL_BUTTON_MIDDLE;
+	snprintf(g_default_roll_binding.bindings[0].raw,
+		sizeof(g_default_roll_binding.bindings[0].raw), "middle");
+	g_binds[0] = &g_default_roll_binding;
+}
+
+static int ReloadRollBindings(void)
+{
+	char discovered_path[sizeof(g_input_config_path)];
+	BindingSet new_bindings;
+	if (LNCT_FindInputConfigPath(discovered_path, sizeof(discovered_path))
+		&& LoadBindingsFromFile(discovered_path, &new_bindings))
+	{
+		snprintf(g_input_config_path, sizeof(g_input_config_path), "%s", discovered_path);
+		LNCT_ReadFileStamp(g_input_config_path, &g_input_config_stamp);
+		const ActionBindings* bindings = FindAction(&new_bindings, "CameraToggleMouseRotate");
+		if (bindings && bindings->binding_count > 0)
+		{
+			g_bs = new_bindings;
+			g_binds[0] = FindAction(&g_bs, "CameraToggleMouseRotate");
+			fprintf(stdout, "\e[1;95m[LNCT]\e[0m Mouse-rotate bindings: %s\n",
+				g_input_config_path);
+			return 1;
+		}
+		UseDefaultRollBinding();
+		fprintf(stdout, "\e[1;95m[LNCT]\e[0m CameraToggleMouseRotate uses BG3 default: middle mouse\n");
+		return 1;
+	}
+
+	if (!g_binds[0])
+	{
+		UseDefaultRollBinding();
+		fprintf(stderr,
+			"\e[1;95m[LNCT]\e[0m WARN: BG3 input config unavailable; using middle mouse button\n");
+	}
+	return 0;
+}
+
+static void MaybeReloadRollBindings(void)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return;
+	long long elapsed_ns = (long long)(now.tv_sec - g_last_binding_check.tv_sec) * 1000000000LL
+		+ (now.tv_nsec - g_last_binding_check.tv_nsec);
+	if (elapsed_ns >= 0 && elapsed_ns < BINDING_RELOAD_INTERVAL_NS)
+		return;
+	g_last_binding_check = now;
+
+	LNCT_FileStamp current_stamp;
+	if (!LNCT_ReadFileStamp(g_input_config_path, &current_stamp))
+	{
+		ReloadRollBindings();
+		return;
+	}
+	if (LNCT_FileStampEqual(&current_stamp, &g_input_config_stamp))
+	{
+		return;
+	}
+
+	/* Reload through a temporary BindingSet. A partially written file leaves
+	 * the last known-good binding active and is retried on the next poll. */
+	if (ReloadRollBindings())
+		ResetInputState();
+}
+
+
+static float GetCameraDeltaTime(void* camera_object)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+		return 0.f;
+
+	CameraTiming* free_slot = NULL;
+	for (int i = 0; i < MAX_TRACKED_CAMERAS; i++)
+	{
+		CameraTiming* timing = &g_camera_timings[i];
+		if (!timing->camera_object && !free_slot)
+			free_slot = timing;
+		if (timing->camera_object != camera_object)
+			continue;
+
+		float delta_time = (float)(now.tv_sec - timing->last_update.tv_sec)
+			+ (float)(now.tv_nsec - timing->last_update.tv_nsec) / 1000000000.f;
+		timing->last_update = now;
+
+		if (delta_time < 0.f)
+			return 0.f;
+		if (delta_time > MAX_CAMERA_DELTA_TIME)
+			return MAX_CAMERA_DELTA_TIME;
+		return delta_time;
+	}
+
+	/* A new camera gets a timing baseline; movement starts on its next update. */
+	CameraTiming* timing = free_slot ? free_slot : &g_camera_timings[0];
+	timing->camera_object = camera_object;
+	timing->last_update = now;
+	return 0.f;
+}
+
 
 float H_CalculateCameraAngle_CallSite(void* pCameraObject, uint8_t angle)
 {
-	g_zoom = (float*)((uint8_t*)pCameraObject + 0x58);
-	int right_stick_button_down = atomic_load(&g_controller_right_stick_button_down);
-	int right_stick_axis_motion_y = atomic_load(&g_controller_right_stick_axis_motion_y);
-	int right_stick_y;
-	if (right_stick_button_down && right_stick_axis_motion_y)
-	{
-		int right_stick_y = atomic_load(&g_controller_right_stick_y);
-		if (right_stick_y > -CONTROLLER_DEADZONE && right_stick_y < CONTROLLER_DEADZONE)
-			right_stick_y = 0;
+	if (!g_setup_succeeded)
+		return O_CalculateCameraAngle(pCameraObject, angle);
 
-		*g_zoom += -((float)right_stick_y / 32767.f * ZOOM_FACTOR);
+	RefreshControllerState();
+	float delta_time = GetCameraDeltaTime(pCameraObject);
+	int roll_keydown = atomic_load(&g_roll_keydown);
+	int left_stick_button_down = atomic_load(&g_controller_left_stick_button_down);
+	int right_stick_axis_motion_y = atomic_load(&g_controller_right_stick_axis_motion_y);
+	if (!roll_keydown && left_stick_button_down && right_stick_axis_motion_y)
+	{
+		int16_t right_stick_y = (int16_t)atomic_load(&g_controller_right_stick_y);
+		LNCT_ApplyZoomDelta(pCameraObject,
+			LNCT_ControllerZoomDelta(right_stick_y, delta_time, g_config.controller_zoom_speed)
+				* (g_config.invert_controller_zoom ? -1.f : 1.f));
+		atomic_store(&g_controller_left_stick_used_for_zoom, 1);
 		return O_CalculateCameraAngle(pCameraObject, angle);
 	}
 	else
 	{
 		int zoom = atomic_exchange(&g_mouse_wheel_y, 0);
-		*g_zoom += -((float)zoom * ZOOM_FACTOR);
+		/* A zero delta must not overwrite BG3's in-progress zoom interpolation. */
+		if (zoom != 0)
+			LNCT_ApplyZoomDelta(pCameraObject, -((float)zoom * MOUSE_ZOOM_FACTOR));
 	}
 
-	int roll_keydown = atomic_load(&g_roll_keydown);
 	if (!roll_keydown && !right_stick_axis_motion_y)
-	{
-		if (O_SDL_GetRelativeMouseMode() == SDL_TRUE)
-			O_SDL_SetRelativeMouseMode(SDL_FALSE);
 		return O_CalculateCameraAngle(pCameraObject, angle);
-	}
-	if (O_SDL_GetRelativeMouseMode() != SDL_TRUE)
-		O_SDL_SetRelativeMouseMode(SDL_TRUE);
 
 	g_roll = (float*)((uint8_t*)pCameraObject + 0x164);
 	float roll = *g_roll;
 
-	if (right_stick_axis_motion_y)
+	/* An explicitly held mouse-rotate binding wins over stale controller state. */
+	if (right_stick_axis_motion_y && !roll_keydown)
 	{
-		int val = atomic_load(&g_controller_right_stick_y);
-		if (val > -CONTROLLER_DEADZONE && val < CONTROLLER_DEADZONE)
-			val = 0;
-
-		float norm = (float)val / 32767.f;
-		roll += norm * CONTROLLER_ROLL_SPEED;
+		int16_t value = (int16_t)atomic_load(&g_controller_right_stick_y);
+		float rotation_speed = LNCT_StableRotationSpeed(
+			*(float*)((uint8_t*)pCameraObject + CAMERA_OBJECT_ROTATION_SPEED_OFFSET));
+		float pitch_delta = LNCT_ControllerPitchDelta(value, delta_time, rotation_speed)
+			* g_config.controller_pitch_sensitivity;
+		roll += g_config.invert_controller_pitch ? -pitch_delta : pitch_delta;
 	}
 	else
 	{
 		int delta = atomic_exchange(&g_mouse_delta_y, 0);
-		roll += (float)delta * ROLL_SENSITIVITY;
+		roll += (float)delta * g_config.mouse_pitch_sensitivity;
 	}
 
 	if (roll > 89.f)
@@ -146,9 +364,22 @@ float H_CalculateCameraAngle_CallSite(void* pCameraObject, uint8_t angle)
 	return O_CalculateCameraAngle(pCameraObject, angle);
 }
 
+static int IsExpectedPitchStore(const uint8_t* instruction)
+{
+	return instruction[0] == 0xF3 && instruction[1] == 0x0F
+		&& instruction[2] == 0x11 && (instruction[3] & 0xC7) == 0x85
+		&& instruction[4] == 0x64 && instruction[5] == 0x01
+		&& instruction[6] == 0x00 && instruction[7] == 0x00;
+}
+
 uint8_t PatchUpdateCamera()
 {
-	void* movss = (void*)GetAddresses()->roll_movss;
+	uint8_t* movss = (uint8_t*)GetAddresses()->roll_movss;
+	if (!IsExpectedPitchStore(movss))
+	{
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Refusing unexpected pitch patch instruction\n");
+		return 0;
+	}
 	long page_size = sysconf(_SC_PAGESIZE);
 	uint64_t page_start = (uint64_t)movss & ~(page_size - 1);
 	size_t num_pages = (((uint64_t)movss + 8 - page_start) + page_size - 1) / page_size;
@@ -162,23 +393,16 @@ uint8_t PatchUpdateCamera()
 	}
 
 	uint8_t nop[8] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
-	memcpy(movss, nop, 8);
-	mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
-
-	movss = (void*)GetAddresses()->zoom_movss;
-	page_start = (uint64_t)movss & ~(page_size - 1);
-	num_pages = (((uint64_t)movss + 6 - page_start) + page_size - 1) / page_size;
-	if (num_pages < 1)
-		num_pages = 1;
-
-	if (mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+	uint8_t original[8];
+	memcpy(original, movss, sizeof(original));
+	memcpy(movss, nop, sizeof(nop));
+	if (mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC) != 0)
 	{
-		fprintf(stdout, "\e[1;95m[LNCT]\e[0m ERR: PatchUpdateCamera(): zoom movss mprotect() failed\n");
+		memcpy(movss, original, sizeof(original));
+		mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: PatchUpdateCamera(): couldn't restore executable page protection\n");
 		return 0;
 	}
-
-	memcpy(movss, nop, 6);
-	mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
 
 	return 1;
 }
@@ -202,33 +426,6 @@ uint8_t SetupCallSitesTrampoline()
 		return 0;
 	}
 
-	callsite = (void*)GetAddresses()->SaveToInputConfigFile_CallSite;
-	trampoline = AllocNear(callsite, page_size);
-	if (!trampoline)
-	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: SetupCallSitesTrampoline(): AllocNear() failed for SaveToInputConfigFile()\n");
-		return 0;
-	}
-
-	if (g_game_build == 4117209685)
-	{
-		if (!PatchCallSite(callsite, trampoline, H_SaveToInputConfigFile_4117209685_CallSite))
-		{
-			fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: SetupCallSitesTrampoline(): PatchCallSite() failed for SaveToInputConfigFile_4117209685()\n");
-			munmap(trampoline, page_size);
-			return 0;
-		}
-	}
-	else
-	{
-		if (!PatchCallSite(callsite, trampoline, H_SaveToInputConfigFile_4117398727_CallSite))
-		{
-			fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: SetupCallSitesTrampoline(): PatchCallSite() failed for SaveToInputConfigFile_4117451994()\n");
-			munmap(trampoline, page_size);
-			return 0;
-		}
-	}
-
 	return 1;
 }
 
@@ -245,8 +442,13 @@ uint64_t FNV1a_Hash(const uint8_t* data, size_t len)
 
 uint64_t GetBuild()
 {
-	size_t size;
+	size_t size = 0;
 	uint8_t* file = MapSelfExe(&size);
+	if (!file || !size)
+	{
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Couldn't read the running BG3 executable\n");
+		return 0;
+	}
     uint64_t hash = FNV1a_Hash(file, size);
     fprintf(stdout, "[LNCT] Binary FNV1a hash: %#lx (size: %zu)\n", hash, size);
     munmap(file, size);
@@ -265,46 +467,61 @@ uint64_t GetBuild()
 void Setup()
 {
 	g_pid = getpid();
+	g_setup_succeeded = 0;
 
 	fprintf(stdout, "\e[1;95m[LNCT]\e[0m \e[1;37mLinux Native Camera Tweaks %s\e[0m\n", VERSION);
 	fprintf(stdout, "\e[1;95m[LNCT]\e[0m Bug(s) ? Suggestion(s) ? Add me on discord: biiinks78\n");
+	g_game_build = GetBuild();
+	if (g_game_build)
+		fprintf(stdout, "\e[1;95m[LNCT]\e[0m Known BG3 build detected: %lu\n", g_game_build);
+	else
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m WARN: Unknown BG3 build; validating patterns and patch instructions\n");
+	if (LNCT_LoadConfig(&g_config, g_config_path, sizeof(g_config_path)))
+	{
+		fprintf(stdout,
+			"\e[1;95m[LNCT]\e[0m Config: %s (controller pitch %.3f, controller zoom %.3f, mouse pitch %.3f, pitch inverted %s, zoom inverted %s)\n",
+			g_config_path,
+			g_config.controller_pitch_sensitivity,
+			g_config.controller_zoom_speed,
+			g_config.mouse_pitch_sensitivity,
+			g_config.invert_controller_pitch ? "yes" : "no",
+			g_config.invert_controller_zoom ? "yes" : "no");
+	}
+	else
+	{
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m WARN: Couldn't load or create controller config; using defaults\n");
+	}
 
-	if (!LoadBindingsFromFile("~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json", &g_bs))
-	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Couldn't load ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
-    	return;
-	}
-	g_binds[0] = (ActionBindings*)FindAction(&g_bs, "CameraToggleMouseRotate");
-	if (!g_binds[0])
-	{
-    	fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Can't find any bind(s) for action \"CameraToggleMouseRotate\" in ~/.local/share/Larian Studios/Baldur's Gate 3/PlayerProfiles/Public/inputconfig_p1.json\n");
-    	return;
-	}
+	ReloadRollBindings();
 
 	struct Sigs* sigs = GetSigs();
 	struct Addresses* addresses = GetAddresses();
-	addresses->CalculateCameraAngle_CallSite = PatternScanSection(sigs->CalculateCameraAngle_Callsite, ".text") + 39;
-	if (addresses->CalculateCameraAngle_CallSite == 39)
+	uint64_t camera_pattern = PatternScanSectionUnique(sigs->CalculateCameraAngle_Callsite, ".text");
+	if (!camera_pattern)
 	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): Pattern scan failed : CalculateCameraAngle_CallSite\ngame update broke the pattern\n");
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): camera pattern missing or ambiguous\n");
 		return;
 	}
-	addresses->SaveToInputConfigFile_CallSite = PatternScanSection(sigs->SaveToInputConfigFile_CallSite, ".text");
-	if (!addresses->SaveToInputConfigFile_CallSite)
-	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): Pattern scan failed : SaveToInputConfigFile_CallSite\ngame update broke the pattern\n");
-		return;
-	}
-	addresses->roll_movss = PatternScanSection(sigs->roll_movss, ".text");
+	addresses->CalculateCameraAngle_CallSite = camera_pattern + 39;
+	addresses->roll_movss = PatternScanSectionUnique(sigs->roll_movss, ".text");
 	if (!addresses->roll_movss)
 	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): Pattern scan failed : roll_movss\ngame update broke the pattern\n");
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): pitch pattern missing or ambiguous\n");
 		return;
 	}
-	addresses->zoom_movss = PatternScanSection(sigs->zoom_movss, ".text");
-	if (!addresses->zoom_movss)
+
+	O_CalculateCameraAngle = ResolveCallTarget((void*)(GetAddresses()->CalculateCameraAngle_CallSite));
+	if (!O_CalculateCameraAngle)
 	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): Pattern scan failed : zoom_movss\ngame update broke the pattern\n");
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Couldn't resolve the original BG3 camera function\n");
+		return;
+	}
+
+	/* Install the guarded call-site first. Until setup succeeds it is a pure
+	 * pass-through, so a later pitch-patch failure leaves BG3 behavior intact. */
+	if (!SetupCallSitesTrampoline())
+	{
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): SetupCallSitesTrampoline() failed\n");
 		return;
 	}
 
@@ -314,26 +531,148 @@ void Setup()
 		return;
 	}
 
-	O_CalculateCameraAngle = ResolveCallTarget((void*)(GetAddresses()->CalculateCameraAngle_CallSite));
-	if (g_game_build == 4117209685)
-		O_SaveToInputConfigFile_4117209685 = ResolveCallTarget((void*)(GetAddresses()->SaveToInputConfigFile_CallSite));
-	else
-		O_SaveToInputConfigFile_4117398727 = ResolveCallTarget((void*)(GetAddresses()->SaveToInputConfigFile_CallSite));
-
-	if (!SetupCallSitesTrampoline())
-	{
-		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: Setup(): SetupCallSitesTrampoline() failed\n");
-		return;
-	}
-
+	g_setup_succeeded = 1;
 	fprintf(stdout, "\e[1;95m[LNCT]\e[0m \e[1;92mEverything has been initialized correctly, enjoy ;)\e[0m\n");
 }
 
 void ResolveSDLSym()
 {
-	O_PollEvent = (int(*)(SDL_Event*))(intptr_t)dlsym(RTLD_NEXT, "SDL_PollEvent");
-	O_SDL_GetRelativeMouseMode = (int(*)(SDL_Event*))(intptr_t)dlsym(RTLD_NEXT, "SDL_GetRelativeMouseMode");
-	O_SDL_SetRelativeMouseMode = (void(*)(int))(intptr_t)dlsym(RTLD_NEXT, "SDL_SetRelativeMouseMode");
+	O_PollEvent = (int(*)(SDL_Event*))(intptr_t)LNCT_DlsymCompat(RTLD_NEXT, "SDL_PollEvent");
+	O_SDL_GetRelativeMouseMode = (SDL_bool(*)(void))(intptr_t)LNCT_DlsymCompat(RTLD_NEXT, "SDL_GetRelativeMouseMode");
+	O_SDL_SetRelativeMouseMode = (int(*)(SDL_bool))(intptr_t)LNCT_DlsymCompat(RTLD_NEXT, "SDL_SetRelativeMouseMode");
+	O_SDL_GameControllerFromInstanceID = (SDL_GameController*(*)(SDL_JoystickID))(intptr_t)
+		LNCT_DlsymCompat(RTLD_NEXT, "SDL_GameControllerFromInstanceID");
+	O_SDL_GameControllerGetAxis = (Sint16(*)(SDL_GameController*, SDL_GameControllerAxis))(intptr_t)
+		LNCT_DlsymCompat(RTLD_NEXT, "SDL_GameControllerGetAxis");
+	O_SDL_GameControllerGetButton = (Uint8(*)(SDL_GameController*, SDL_GameControllerButton))(intptr_t)
+		LNCT_DlsymCompat(RTLD_NEXT, "SDL_GameControllerGetButton");
+}
+
+/* Return non-zero when the event is handled by the mod and hidden from BG3. */
+static int HandleSDLEvent(const SDL_Event* event)
+{
+	if (event->type == SDL_MOUSEMOTION)
+	{
+		if (atomic_exchange(&g_ignore_next_mouse_motion, 0))
+			return 0;
+		if (atomic_load(&g_roll_keydown))
+			atomic_fetch_add(&g_mouse_delta_y, event->motion.yrel);
+	}
+	else if (event->type == SDL_MOUSEWHEEL)
+	{
+		atomic_fetch_add(&g_mouse_wheel_y, event->wheel.y);
+		return 1;
+	}
+	else if (event->type == SDL_MOUSEBUTTONDOWN)
+	{
+		if (g_binds[0])
+		{
+			for (int i = 0; i < g_binds[0]->binding_count; i++)
+			{
+				const Binding* b = &g_binds[0]->bindings[i];
+				if ((b->type == BINDING_MOUSE) && event->button.button == b->mouse_button)
+					SetRollInputSource(ROLL_INPUT_MOUSE, 1);
+			}
+		}
+	}
+	else if (event->type == SDL_MOUSEBUTTONUP)
+	{
+		if (g_binds[0])
+		{
+			for (int i = 0; i < g_binds[0]->binding_count; i++)
+			{
+				const Binding* b = &g_binds[0]->bindings[i];
+				if ((b->type == BINDING_MOUSE) && event->button.button == b->mouse_button)
+					SetRollInputSource(ROLL_INPUT_MOUSE, 0);
+			}
+		}
+	}
+	else if (event->type == SDL_KEYDOWN)
+	{
+		if (g_binds[0])
+		{
+			for (int i = 0; i < g_binds[0]->binding_count; i++)
+			{
+				const Binding* b = &g_binds[0]->bindings[i];
+				if ((b->type == BINDING_KEY) && event->key.keysym.scancode == b->scancode)
+					SetRollInputSource(ROLL_INPUT_KEYBOARD, 1);
+			}
+		}
+	}
+	else if (event->type == SDL_KEYUP)
+	{
+		if (g_binds[0])
+		{
+			for (int i = 0; i < g_binds[0]->binding_count; i++)
+			{
+				const Binding* b = &g_binds[0]->bindings[i];
+				if ((b->type == BINDING_KEY) && event->key.keysym.scancode == b->scancode)
+					SetRollInputSource(ROLL_INPUT_KEYBOARD, 0);
+			}
+		}
+	}
+	else if ((event->type == SDL_CONTROLLERAXISMOTION) && event->caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY)
+	{
+		int16_t value = event->caxis.value;
+		int axis_active = LNCT_NormalizeControllerAxis(value) != 0.f;
+		atomic_store(&g_controller_instance_id, event->caxis.which);
+		atomic_store(&g_controller_right_stick_y, value);
+		atomic_store(&g_controller_right_stick_axis_motion_y, axis_active);
+		if (axis_active && atomic_load(&g_controller_left_stick_button_down))
+			atomic_store(&g_controller_left_stick_used_for_zoom, 1);
+		return 1;
+	}
+	else if ((event->type == SDL_CONTROLLERBUTTONDOWN) && event->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK)
+	{
+		atomic_store(&g_controller_instance_id, event->cbutton.which);
+		atomic_store(&g_controller_left_stick_button_down, 1);
+		atomic_store(&g_controller_left_stick_used_for_zoom,
+			atomic_load(&g_controller_right_stick_axis_motion_y));
+		g_left_stick_down_event = *event;
+		g_has_left_stick_down_event = 1;
+		return 1;
+	}
+	else if ((event->type == SDL_CONTROLLERBUTTONUP) && event->cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSTICK)
+	{
+		atomic_store(&g_controller_instance_id, event->cbutton.which);
+		int used_for_zoom = atomic_exchange(&g_controller_left_stick_used_for_zoom, 0);
+		atomic_store(&g_controller_left_stick_button_down, 0);
+		if (!used_for_zoom && g_has_left_stick_down_event)
+		{
+			g_deferred_controller_events[0] = g_left_stick_down_event;
+			g_deferred_controller_events[1] = *event;
+			g_deferred_controller_event_count = 2;
+			g_deferred_controller_event_index = 0;
+		}
+		g_has_left_stick_down_event = 0;
+		return 1;
+	}
+	else if (event->type == SDL_CONTROLLERDEVICEREMOVED
+		|| (event->type == SDL_WINDOWEVENT && event->window.event == SDL_WINDOWEVENT_FOCUS_LOST))
+	{
+		ResetControllerState();
+		atomic_store(&g_controller_instance_id, -1);
+		ResetInputState();
+		g_has_left_stick_down_event = 0;
+		g_deferred_controller_event_count = 0;
+		g_deferred_controller_event_index = 0;
+	}
+
+	return 0;
+}
+
+static int PopDeferredControllerEvent(SDL_Event* event)
+{
+	if (g_deferred_controller_event_index >= g_deferred_controller_event_count)
+		return 0;
+
+	*event = g_deferred_controller_events[g_deferred_controller_event_index++];
+	if (g_deferred_controller_event_index >= g_deferred_controller_event_count)
+	{
+		g_deferred_controller_event_count = 0;
+		g_deferred_controller_event_index = 0;
+	}
+	return 1;
 }
 
 int SDL_PollEvent(SDL_Event* event)
@@ -343,73 +682,37 @@ int SDL_PollEvent(SDL_Event* event)
 
 	if (!O_PollEvent)
 		ResolveSDLSym();
+	if (!O_PollEvent)
+		return 0;
+	if (!g_setup_succeeded)
+		return O_PollEvent(event);
+	MaybeReloadRollBindings();
 
-	int ret = O_PollEvent(event);
-	if (ret && event)
+	/* Preserve SDL_PollEvent(NULL)'s queue-check semantics. */
+	if (!event)
 	{
-		if (event->type == SDL_MOUSEMOTION)
-			atomic_store(&g_mouse_delta_y, event->motion.yrel);
-		else if (event->type == SDL_MOUSEWHEEL)
+		if (g_deferred_controller_event_index < g_deferred_controller_event_count)
+			return 1;
+		return O_PollEvent(NULL);
+	}
+	if (PopDeferredControllerEvent(event))
+		return 1;
+
+	int ret;
+	while ((ret = O_PollEvent(event)) != 0)
+	{
+		/*
+		 * Never return 0 merely because the mod consumed one event: BG3 uses
+		 * SDL's conventional while(SDL_PollEvent(...)) loop, where 0 means the
+		 * entire queue is empty.  Continue to the next queued event instead.
+		 */
+		if (HandleSDLEvent(event))
 		{
-			atomic_store(&g_mouse_wheel_y, event->wheel.y);
-			return 0; 
+			if (PopDeferredControllerEvent(event))
+				return 1;
+			continue;
 		}
-		else if (event->type == SDL_MOUSEBUTTONDOWN)
-		{
-			for (int i = 0; i < g_binds[0]->binding_count; i++)
-			{
-    			const Binding* b = &g_binds[0]->bindings[i];
-				if ((b->type == BINDING_MOUSE) && event->button.button == b->mouse_button)
-					atomic_store(&g_roll_keydown, 1);
-			}
-		}
-		else if (event->type == SDL_MOUSEBUTTONUP)
-		{
-			for (int i = 0; i < g_binds[0]->binding_count; i++)
-			{
-    			const Binding* b = &g_binds[0]->bindings[i];
-				if ((b->type == BINDING_MOUSE) && event->button.button == b->mouse_button)
-					atomic_store(&g_roll_keydown, 0);
-			}
-		}
-		else if (event->type == SDL_KEYDOWN)
-		{
-			for (int i = 0; i < g_binds[0]->binding_count; i++)
-			{
-    			const Binding* b = &g_binds[0]->bindings[i];
-				if ((b->type == BINDING_KEY) && event->key.keysym.scancode == b->scancode)
-					atomic_store(&g_roll_keydown, 1);
-			}
-		}
-		else if (event->type == SDL_KEYUP)
-		{
-			for (int i = 0; i < g_binds[0]->binding_count; i++)
-			{
-    			const Binding* b = &g_binds[0]->bindings[i];
-				if ((b->type == BINDING_KEY) && event->key.keysym.scancode == b->scancode)
-					atomic_store(&g_roll_keydown, 0);
-			}
-		}
-		else if ((event->type == SDL_CONTROLLERAXISMOTION) && event->caxis.axis == SDL_CONTROLLER_AXIS_RIGHTY)
-		{
-			int16_t val = event->caxis.value;
-			if (val > CONTROLLER_DEADZONE || val < -CONTROLLER_DEADZONE)
-        	{
-				atomic_store(&g_controller_right_stick_axis_motion_y, 1);
-				atomic_store(&g_controller_right_stick_y, val);
-			}
-			else
-        		atomic_store(&g_controller_right_stick_axis_motion_y, 0);
-			return 0;
-		}
-		else if ((event->type == SDL_CONTROLLERBUTTONDOWN) && event->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK)
-		{
-			atomic_store(&g_controller_right_stick_button_down, 1);
-		}
-		else if ((event->type == SDL_CONTROLLERBUTTONUP) && event->cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSTICK)
-		{
-			atomic_store(&g_controller_right_stick_button_down, 0);
-		}
+		return ret;
 	}
 
 	return ret;

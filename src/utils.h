@@ -1,7 +1,6 @@
 #pragma once
 
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
@@ -142,6 +141,12 @@ static void* PatchCallSite(void* callsite, void* trampoline, void* trampoline_ta
 	t[off++] = 0xFF; t[off++] = 0xE0;
 
 	long page_size = sysconf(_SC_PAGESIZE);
+	if (mprotect(trampoline, (size_t)page_size, PROT_READ | PROT_EXEC) != 0)
+	{
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: PatchCallSite(): couldn't protect trampoline as executable\n");
+		return NULL;
+	}
+
 	uint64_t page_start = (uint64_t)cs & ~(page_size - 1);
 	size_t num_pages = (((uint64_t)cs + 5 - page_start) + page_size - 1) / page_size;
 	if (num_pages < 1)
@@ -156,7 +161,13 @@ static void* PatchCallSite(void* callsite, void* trampoline, void* trampoline_ta
 	int32_t new_rel = (int32_t)rel_to_tramp;
 	memcpy(cs + 1, &new_rel, 4);
 
-	mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
+	if (mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC) != 0)
+	{
+		memcpy(cs + 1, &orig_rel, 4);
+		mprotect((void*)page_start, num_pages * page_size, PROT_READ | PROT_EXEC);
+		fprintf(stderr, "\e[1;95m[LNCT]\e[0m ERR: PatchCallSite(): couldn't restore executable page protection\n");
+		return NULL;
+	}
 	return original_target;
 }
 
@@ -166,21 +177,23 @@ static uint8_t* MapSelfExe(size_t* out_size)
 	if (fd < 0)
         return 0;
 
-    struct stat st;
-    if (fstat(fd, &st) != 0)
+    off_t size = lseek(fd, 0, SEEK_END);
+    if (size <= 0)
     {
         close(fd);
         return 0;
 	}
 
-    void* map = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	void* map = mmap(0, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
 
-    if (map == MAP_FAILED)
-        return 0;
+	if (map == MAP_FAILED)
+	{
+		return 0;
+	}
 
-    *out_size = st.st_size;
-    return (uint8_t*)map;
+	*out_size = (size_t)size;
+	return (uint8_t*)map;
 }
 
 static uint64_t GetSectionAddress(const char* section, uint64_t* size_buffer)
@@ -221,7 +234,8 @@ static uint64_t GetSectionAddress(const char* section, uint64_t* size_buffer)
     return result;
 }
 
-static uint64_t PatternScanSection(const char* ida_pattern, const char* section)
+/* Patching the wrong occurrence is worse than disabling the mod. */
+static uint64_t PatternScanSectionUnique(const char* ida_pattern, const char* section)
 {
     Pattern pattern;
 	BuildPattern(&pattern, ida_pattern);
@@ -230,7 +244,8 @@ static uint64_t PatternScanSection(const char* ida_pattern, const char* section)
     if (!section_base || section_size < pattern.length)
         return 0;
 
-    uint8_t occurrences = 0;
+    uint64_t match = 0;
+    unsigned int match_count = 0;
     for (uint64_t i = 0; i <= section_size - pattern.length; i++)
     {
         for (uint16_t p = 0; p < pattern.length; p++)
@@ -238,9 +253,11 @@ static uint64_t PatternScanSection(const char* ida_pattern, const char* section)
         	if (pattern.mask[p] == 'x' && section_base[i + p] != pattern.bytes[p])
                 goto next;
         }
-        return (uint64_t)(section_base + i);
+        match = (uint64_t)(section_base + i);
+        if (++match_count > 1)
+            return 0;
         next:
         continue;
     }
-	return 0;
+	return match_count == 1 ? match : 0;
 }

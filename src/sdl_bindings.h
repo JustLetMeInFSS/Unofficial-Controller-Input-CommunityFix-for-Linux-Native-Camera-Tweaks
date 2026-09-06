@@ -138,9 +138,12 @@ static inline int ParseBindingToken(const char* token, Binding* out)
     }
     if (strncmp(token, "mouse:", 6) == 0)
 	{
+		int button = MouseButtonFromName(token + 6);
+		if (!button)
+			return 0;
         out->type = BINDING_MOUSE;
         out->scancode = SDL_SCANCODE_UNKNOWN;
-        out->mouse_button = MouseButtonFromName(token + 6);
+		out->mouse_button = button;
         strncpy(out->raw, token + 6, sizeof(out->raw) - 1);
         out->raw[sizeof(out->raw) - 1] = '\0';
         return 1;
@@ -230,7 +233,7 @@ static inline int ParseBindingsJson(const char* json, BindingSet* out)
             return 0;
         p = SkipWs(p + 1);
 
-        Binding found[LNCT_MAX_BINDINGS_PER_ACTION];
+        Binding found[LNCT_MAX_BINDINGS_PER_ACTION] = {0};
         int found_count = 0;
 
         if (*p != ']')
@@ -262,8 +265,7 @@ static inline int ParseBindingsJson(const char* json, BindingSet* out)
         if (out->action_count < LNCT_MAX_ACTIONS)
 		{
             ActionBindings* ab = &out->actions[out->action_count++];
-            strncpy(ab->name, action_name, sizeof(ab->name) - 1);
-            ab->name[sizeof(ab->name) - 1] = '\0';
+			snprintf(ab->name, sizeof(ab->name), "%s", action_name);
             ab->binding_count = found_count;
             memcpy(ab->bindings, found, sizeof(Binding) * (size_t)found_count);
         }
@@ -316,7 +318,11 @@ static inline char* ReadBindsFile(const char* path)
 		fclose(f); 
 		return NULL; 
 	}
-    fseek(f, 0, SEEK_SET);
+	if (fseek(f, 0, SEEK_SET) != 0)
+	{
+		fclose(f);
+		return NULL;
+	}
 
     char* buf = (char*)malloc((size_t)size + 1);
     if (!buf) 
@@ -327,6 +333,11 @@ static inline char* ReadBindsFile(const char* path)
 
     size_t read = fread(buf, 1, (size_t)size, f);
     fclose(f);
+	if (read != (size_t)size)
+	{
+		free(buf);
+		return NULL;
+	}
     buf[read] = '\0';
     return buf;
 }
