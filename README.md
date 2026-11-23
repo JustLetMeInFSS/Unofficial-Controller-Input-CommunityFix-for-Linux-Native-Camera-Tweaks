@@ -16,6 +16,8 @@ A native Linux camera mod for **Baldur’s Gate 3**, originally created by **Bii
 * Live controller-state reconciliation prevents stuck or inverted input.
 * Automatic mouse-rotation binding reload without restarting the game.
 * Portable profile and configuration paths.
+* Local splitscreen support: each player's controller drives their own camera.
+* Optional vanilla camera controls during combat (default in splitscreen).
 * Safe pattern and instruction validation for compatible future game builds.
 
 The update also fixes controller input delay caused by prematurely terminating SDL event polling and resolves persistent camera jitter after zooming.
@@ -75,6 +77,20 @@ invert_controller_zoom=false
 * `invert_controller_pitch`: reverses vertical controller rotation
 * `invert_controller_zoom`: reverses controller zoom direction
 
+Additional settings (defaults shown):
+
+```ini
+swap_splitscreen_controllers=false
+controller_pitch_follows_game_speed=false
+vanilla_combat_camera=splitscreen
+pitch_method=sync
+```
+
+* `swap_splitscreen_controllers`: set to `true` if each player's stick moves the other player's camera
+* `controller_pitch_follows_game_speed`: `true` restores the old behaviour where controller pitch speed varied between areas
+* `vanilla_combat_camera`: `splitscreen` (vanilla camera in combat once splitscreen has been used), `always` or `never`
+* `pitch_method`: `sync` (no idle camera jitter) or `direct` (the earlier method, for comparison)
+
 With the default configuration, pushing the stick upward zooms in.
 
 Configuration-file changes require a game restart. Changes to BG3’s mouse-rotation binding are detected automatically while the game is running.
@@ -94,6 +110,12 @@ A larger stable zoom range may be explored separately in a future experimental u
 Dedicated controller-compatible Tactical Camera behavior is not included in this release. Extended top-down camera angles remain available, but tactical outlines may not persist after switching from mouse/keyboard to controller.
 
 This feature is intentionally deferred to avoid adding another unverified game-action hook to the stable release.
+
+## Splitscreen
+
+In local splitscreen both players get extended pitch and L3 + right-stick zoom. Controllers are assigned to players in connection order; use `swap_splitscreen_controllers=true` if they are reversed. By default each player's camera switches to vanilla BG3 controls while that player is in combat and back to the modded controls afterwards. Set `vanilla_combat_camera=never` to keep the modded controls in combat.
+
+Set `LNCT_DEBUG=1` in the environment to log per-camera and per-controller diagnostics.
 
 ## Building and testing
 
@@ -119,6 +141,7 @@ Runtime camera-hook validation still requires the native Linux version of BG3.
 * **JustLetMeInFSS** — controller input latency fix and some zoom, portability, integration work
 * **Joegoldin** — SDL event-queue, safety and binding-fallback contributions
 * **ersh1** — Windows implementation used as a controller-response reference
+* **jaymaverick** — local splitscreen support, consistent controller pitch speed and idle camera-jitter fix (developed with AI assistance from Claude)
 
 ## Permissions
 

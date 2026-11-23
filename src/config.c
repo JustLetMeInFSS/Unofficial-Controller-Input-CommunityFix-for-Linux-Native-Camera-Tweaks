@@ -48,6 +48,10 @@ void LNCT_SetConfigDefaults(LNCT_Config* config)
 	config->mouse_pitch_sensitivity = LNCT_DEFAULT_MOUSE_PITCH_SENSITIVITY;
 	config->invert_controller_pitch = 0;
 	config->invert_controller_zoom = LNCT_DEFAULT_INVERT_CONTROLLER_ZOOM;
+	config->swap_splitscreen_controllers = 0;
+	config->vanilla_combat_camera = LNCT_VANILLA_COMBAT_SPLITSCREEN;
+	config->pitch_method = LNCT_PITCH_SYNC;
+	config->controller_pitch_follows_game_speed = 0;
 }
 
 static int EnsureParentDirectory(const char* path)
@@ -171,6 +175,26 @@ int LNCT_LoadConfig(LNCT_Config* config, char* path, size_t path_size)
 				value, 0.1f, 4.0f, &config->mouse_pitch_sensitivity);
 		else if (!strcmp(key, "invert_controller_pitch"))
 			ParseBool(value, &config->invert_controller_pitch);
+		else if (!strcmp(key, "vanilla_combat_camera"))
+		{
+			if (!strcasecmp(value, "never") || !strcasecmp(value, "false"))
+				config->vanilla_combat_camera = LNCT_VANILLA_COMBAT_NEVER;
+			else if (!strcasecmp(value, "always") || !strcasecmp(value, "true"))
+				config->vanilla_combat_camera = LNCT_VANILLA_COMBAT_ALWAYS;
+			else if (!strcasecmp(value, "splitscreen"))
+				config->vanilla_combat_camera = LNCT_VANILLA_COMBAT_SPLITSCREEN;
+		}
+		else if (!strcmp(key, "pitch_method"))
+		{
+			if (!strcasecmp(value, "direct"))
+				config->pitch_method = LNCT_PITCH_DIRECT;
+			else if (!strcasecmp(value, "sync"))
+				config->pitch_method = LNCT_PITCH_SYNC;
+		}
+		else if (!strcmp(key, "controller_pitch_follows_game_speed"))
+			ParseBool(value, &config->controller_pitch_follows_game_speed);
+		else if (!strcmp(key, "swap_splitscreen_controllers"))
+			ParseBool(value, &config->swap_splitscreen_controllers);
 		else if (!strcmp(key, "invert_controller_zoom"))
 			has_invert_controller_zoom = ParseBool(value, &config->invert_controller_zoom);
 	}

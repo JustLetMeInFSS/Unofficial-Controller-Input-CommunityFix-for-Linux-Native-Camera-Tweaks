@@ -45,3 +45,22 @@ if(BUILD_TESTING)
     target_include_directories(sdl_bindings_tests PRIVATE src ${SDL2_INCLUDE_DIRS})
     add_test(NAME sdl_bindings_tests COMMAND sdl_bindings_tests)
 endif()
+
+if(BUILD_TESTING)
+    add_executable(splitscreen_tests tests/splitscreen_test.c
+        src/config.c src/file_stamp.c src/portable_paths.c src/offsets.c)
+    target_include_directories(splitscreen_tests PRIVATE src ${SDL2_INCLUDE_DIRS})
+    target_compile_definitions(splitscreen_tests PRIVATE _GNU_SOURCE)
+    target_link_libraries(splitscreen_tests PRIVATE ${CMAKE_DL_LIBS} m)
+    add_test(NAME splitscreen_tests COMMAND splitscreen_tests)
+endif()
+
+if(BUILD_TESTING)
+    add_executable(pitch_stub_tests tests/pitch_stub_test.c
+        src/config.c src/file_stamp.c src/portable_paths.c src/offsets.c)
+    target_include_directories(pitch_stub_tests PRIVATE src ${SDL2_INCLUDE_DIRS})
+    target_compile_definitions(pitch_stub_tests PRIVATE _GNU_SOURCE)
+    target_link_libraries(pitch_stub_tests PRIVATE ${CMAKE_DL_LIBS} m)
+    add_test(NAME pitch_stub_tests COMMAND pitch_stub_tests)
+endif()
+
