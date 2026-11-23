@@ -8,6 +8,9 @@
 #define LNCT_CONTROLLER_DEADZONE 0.15f
 #define LNCT_CONTROLLER_CAMERA_ROTATION_MULT 2.0f
 #define LNCT_CONTROLLER_PITCH_MULT 0.5f
+/* Fixed rotation speed for controller pitch: degrees/s at full stick
+ * = this * controller_pitch_sensitivity (120 * 0.25 = 30 deg/s). */
+#define LNCT_REFERENCE_ROTATION_SPEED 120.0f
 
 /*
  * SDL's signed axis range is asymmetric: -32768..32767.  Normalize both

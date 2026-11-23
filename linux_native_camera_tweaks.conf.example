@@ -7,3 +7,11 @@ mouse_pitch_sensitivity=1.50
 invert_controller_pitch=false
 # false: stick up zooms in; true: stick up zooms out
 invert_controller_zoom=false
+# Splitscreen: set to true if each player's stick moves the other player's camera
+swap_splitscreen_controllers=false
+# true: controller pitch speed follows the game camera speed (varies by area)
+controller_pitch_follows_game_speed=false
+# Combat camera: splitscreen (vanilla in combat once splitscreen was used), always, never
+vanilla_combat_camera=splitscreen
+# Pitch: sync (no jitter) or direct (original method)
+pitch_method=sync

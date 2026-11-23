@@ -7,6 +7,8 @@
 #define LNCT_CAMERA_CURRENT_ZOOM_A_OFFSET 0x54
 #define LNCT_CAMERA_CURRENT_ZOOM_B_OFFSET 0x58
 #define LNCT_CAMERA_DESIRED_ZOOM_OFFSET 0x5C
+/* Point the camera orbits (follows the controlled character). */
+#define LNCT_CAMERA_ROOT_POS_OFFSET 0x18
 
 /*
  * BG3 interpolates currentZoomA/currentZoomB towards desiredZoom.  Moving only
